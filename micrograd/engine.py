@@ -136,7 +136,7 @@ class Value:
                 other.grad += dL_dC * self.data
             
             else:
-                raise RuntimeError(f"Unhandled ndim in matrix multiplication backward: self={self.ndim}D, other={other.ndim}D")
+                raise RuntimeError(f"Unhandled ndim in matmul's backward: self={self.ndim}D, other={other.ndim}D")
             
         out._backward = _backward
         return out
@@ -154,7 +154,24 @@ class Value:
         out = Value(out_data, (self,), 'sum')
         
         def _backward():
-            pass
+            if axis is None:
+                grad = np.ones_like(self.data) * out.grad
+            else:
+                if keepdims:
+                    grad = out.grad
+                else:
+                    if self.ndim == 1:
+                        grad = np.ones_like(self.data) * out.grad
+                    elif self.ndim == 2:
+                        if axis == 0:
+                            grad = np.reshape(out.grad, (1, -1))
+                        else:
+                            grad = np.reshape(out.grad, (-1, 1))
+            self.grad += grad
         
         out._backward = _backward
         return out
+
+    def reshape(self, *shape):
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = shape[0]
