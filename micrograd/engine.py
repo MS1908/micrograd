@@ -1,177 +1,108 @@
 import numpy as np
-import math
 
 
-def unbroadcast_grad(target_shape, grad):  # In unbroadcast, grad.ndim >= target.ndim
-    if grad.ndim < len(target_shape):
-        raise ValueError(f"Target ndim {len(target_shape)} should never exceed grad.ndim {grad.ndim} when unbroadcast.")
+def unbroadcast_grad(grad, target_shape):
+    orig_shape = grad.shape
+    while grad.ndim > len(target_shape):
+        grad = grad.sum(axis=0)
+        
+    for i in range(grad.ndim):
+        if target_shape[i] == 1 and grad.shape[i] > 1:
+            grad = grad.sum(axis=i, keepdims=True)
+            
+    if grad.shape != target_shape:
+        raise ValueError(f"Cannot unbroadcast grad with shape {orig_shape} to {target_shape}")
     
-    if grad.shape == target_shape:
-        return grad
-    
-    if target_shape == ():
-        # Broadcasting scalar to vector/matrices -> Unbroadcast back to scalar
-        return np.sum(grad)
-    
-    if len(target_shape) == 1:
-        if grad.ndim == 1:  # grad shape != target shape
-            if target_shape[0] == 1 and grad.shape[0] > 1:
-                # Broadcasting (1,) to (N,) -> Unbroadcast (N,) to (1,). 
-                # Basically broadcast scalar to vector
-                return np.sum(grad, keepdims=True)
-            else:
-                raise ValueError(f"Cannot unbroadcast 1D grad {grad.shape} to 1D target {target_shape}")
-
-        elif grad.ndim == 2:
-            # Broadcast (R, C) back to (R, 1) or (1, C)
-            if target_shape[0] == grad.shape[1]:
-                return grad.sum(axis=0)
-            elif target_shape[0] == grad.shape[0]:
-                return grad.sum(axis=1)
-            else:
-                raise ValueError(f"Cannot unbroadcast 2D grad {grad.shape} to 1D target {target_shape}")
-
-    if len(target_shape) == 2:
-        # It will always be unbroadcasting (R, C) back to (R, 1) or (1, C) or (1, 1). Otherwise the first check should caught it.
-        axes_to_sum = []
-        if target_shape[0] == 1 and grad.shape[0] > 1:
-            axes_to_sum.append(0)
-        if target_shape[1] == 1 and grad.shape[1] > 1:
-            axes_to_sum.append(1)
-
-        if axes_to_sum:
-            sum_grad = grad.sum(axis=tuple(axes_to_sum), keepdims=True)
-            return sum_grad
-        else:
-            raise ValueError(f"Cannot unbroadcast 2D grad {grad.shape} to 2D target {target_shape}")
+    return grad
 
 
 class Value:
 
-    def __init__(self, data, _children=(), _op=''):
+    def __init__(self, data, _children=()):
         if not isinstance(data, np.ndarray):
             try:
-                data = np.array(data, dtype=np.float64)
-            except TypeError:
-                raise TypeError(f"Data must be convertible to a numpy array, got type {type(data)}")
+                data = np.array(data)
+            except (TypeError, ValueError) as e:
+                raise TypeError(f"Can not convert data type {type(data)} to numpy array")
             
         if data.ndim > 2:
-            raise ValueError(f"Value class restricted to ndim <= 2, got shape {data.shape}")
-
-        self.data = data
+            raise ValueError(f"Data of value must have number of dimensions less than 3, got {data.ndim} dimensions")
+        
+        self.data = data.astype(np.float64)
         self.grad = np.zeros_like(data, dtype=np.float64)
         self._backward = lambda: None
         self._prev = set(_children)
-        self._op = _op
-
-    @property
-    def shape(self):
-        return self.data.shape
-    
-    @property
-    def ndim(self):
-        return self.data.ndim
-
+        
     def __repr__(self):
-        return f"shape={self.shape}\ndata={self.data}\ngrad_shape={self.grad.shape if hasattr(self, 'grad') else None}"
-
-    def __hash__(self):
-        return id(self)
-
+        return f"data={self.data}\ngrad={self.grad}"
+    
+    def __str__(self):
+        return f"data={self.data}\ngrad={self.grad}"
+    
     def __add__(self, other):
         other = other if isinstance(other, Value) else Value(other)
         out_data = self.data + other.data
-        out = Value(out_data, (self, other), op='+')
-
+        out = Value(out_data, (self, other))
+        
         def _backward():
-            self.grad += unbroadcast_grad(self.shape, out.grad)
-            other.grad += unbroadcast_grad(other.shape, out.grad)
-
+            self.grad += unbroadcast_grad(out.grad, self.data.shape)
+            other.grad += unbroadcast_grad(out.grad, other.data.shape)
+        
         out._backward = _backward
         return out
 
-    def __radd__(self, other):
-        return self + other
-
-    def __mul__(self, other):  # Element-wise product, a.k.a Hadamard's product
+    def __mul__(self, other):
         other = other if isinstance(other, Value) else Value(other)
         out_data = self.data * other.data
-        out = Value(out_data, (self, other), '*')
+        out = Value(out_data, (self, other))
 
         def _backward():
-            self.grad += unbroadcast_grad(self.shape, other.data * out.grad)
-            other.grad += unbroadcast_grad(other.shape, self.data * out.grad)
+            self.grad += unbroadcast_grad(other.data * out.grad, self.data.shape)
+            other.grad += unbroadcast_grad(self.data * out.grad, other.data.shape)
+        
+        out._backward = _backward
+        return out
+
+    def __pow__(self, other):
+        assert isinstance(other, (int, float)), "only support int/float powers"
+        out_data = self.data ** other
+        out = Value(out_data, (self,))
+
+        def _backward():
+            self.grad += (other * self.data ** (other - 1)) * out.grad
 
         out._backward = _backward
         return out
 
-    def __rmul__(self, other):
-        return self * other
-    
     def __matmul__(self, other):
         other = other if isinstance(other, Value) else Value(other)
-        if self.data.ndim < 1 or other.data.ndim < 1:
-            raise ValueError("Matmul requires operand with at lest 1 dimension")
-        
-        out_data = np.matmul(self.data, other.data)
-        out = Value(out_data, (self, other), '@')
+        out_data = self.data @ other.data
+        out = Value(out_data, (self, other))
         
         def _backward():
-            dL_dC = out.grad
-            
-            if self.ndim == 2 and other.ndim == 2:
-                self.grad += np.matmul(dL_dC, other.data.T)
-                other.grad += np.matmul(self.data.T, dL_dC)
-            
-            elif self.ndim == 2 and other.ndim == 1:
-                self.grad += np.outer(dL_dC, other.data)
-                other.grad += np.matmul(self.data.T, dL_dC)
-            
-            elif self.ndim == 1 and other.ndim == 2:
-                self.grad += np.matmul(dL_dC, other.data.T)
-                other.grad += np.outer(self.data, dL_dC)
-            
-            elif self.ndim == 1 and other.ndim == 1:
-                self.grad += dL_dC * other.data
-                other.grad += dL_dC * self.data
-            
-            else:
-                raise RuntimeError(f"Unhandled ndim in matmul's backward: self={self.ndim}D, other={other.ndim}D")
-            
+            if self.data.ndim == 2 and other.data.ndim == 2:
+                # A (m,n) @ B (n,p) -> out (m,p) => grad_a shape (m,n), grad_b shape (n,p)
+                # grad (m,p) @ B.T (p,n) -> grad_a (m,n)
+                # A.T (n,m) @ grad (m,p) -> grad_b (n,p)
+                self.grad += out.grad @ other.data.T
+                other.grad += self.data.T @ out.grad
+            elif self.data.ndim == 1 and other.data.ndim == 2:
+                # A (m,) @ B (m,n) -> out (n,) => grad_a shape (m,), grad_b shape (m,n)
+                # grad (n,) @ B.T (n,m) -> grad_a (m,) -- OK
+                # A.T (m,) @ grad (n,) -> ? (Because of transpose of vector in numpy leave the vector unchange)
+                # So we use outer product for A.T and grad here
+                self.grad += out.grad @ other.data.T
+                other.grad += np.outer(self.data, out.grad)
+            elif self.data.ndim == 2 and other.data.ndim == 1:
+                # A (m,n) @ B (n,) -> out (m,) => grad_a shape (m,n), grad_b shape (n,)
+                # A.T (n,m) @ grad (m,) -> grad_b (n,) -- OK
+                # grad (m,) @ B.T (n,) -> ?
+                # Similarly, we use outer product
+                self.grad += np.outer(out.grad, other.data)
+                other.grad += self.data.T @ out.grad
+            else:  # Only case remain: Both data have dim 1 -> Dot product
+                self.grad += other.data * out.grad
+                other.grad += self.data * out.grad
+                
         out._backward = _backward
         return out
-    
-    def sum(self, axis=None, keepdims=False):
-        if self.ndim == 0:
-            return self
-        
-        if axis is not None and axis not in [0, 1]:
-            raise ValueError(f"Axis must be either None, 0 or 1")
-        if self.ndim == 1 and axis == 1:
-            raise ValueError(f"Axis out of bound")
-        
-        out_data = np.sum(self.data, axis=axis, keepdims=True)
-        out = Value(out_data, (self,), 'sum')
-        
-        def _backward():
-            if axis is None:
-                grad = np.ones_like(self.data) * out.grad
-            else:
-                if keepdims:
-                    grad = out.grad
-                else:
-                    if self.ndim == 1:
-                        grad = np.ones_like(self.data) * out.grad
-                    elif self.ndim == 2:
-                        if axis == 0:
-                            grad = np.reshape(out.grad, (1, -1))
-                        else:
-                            grad = np.reshape(out.grad, (-1, 1))
-            self.grad += grad
-        
-        out._backward = _backward
-        return out
-
-    def reshape(self, *shape):
-        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
-            shape = shape[0]
