@@ -1,6 +1,7 @@
 import numpy as np
 
 
+# Broadcasting rules: https://numpy.org/doc/stable/user/basics.broadcasting.html
 def unbroadcast_grad(grad, target_shape):
     orig_shape = grad.shape
     while grad.ndim > len(target_shape):
@@ -62,6 +63,13 @@ class Value:
         
         out._backward = _backward
         return out
+    
+    def __neg__(self):
+        return self * -1.
+    
+    def __sub__(self, other):
+        other = other if isinstance(other, Value) else Value(other)
+        return self + (-other)
 
     def __pow__(self, other):
         assert isinstance(other, (int, float)), "only support int/float powers"
@@ -106,3 +114,48 @@ class Value:
                 
         out._backward = _backward
         return out
+    
+    def sum(self, axis=None, keepdims=False):
+        out_data = np.sum(self.data, axis=axis, keepdims=keepdims)
+        out = Value(out_data, (self,))
+        
+        def _backward():
+            self.grad += np.ones_like(self.data) * out.grad
+            
+        out._backward = _backward
+        return out
+    
+    def T(self):
+        out_data = self.data.T
+        out = Value(out_data, (self,))
+        
+        def _backward():
+            self.grad += out.grad.T
+        
+        out._backward = _backward
+        return out
+    
+    def reshape(self, *shape):
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = shape[0]
+        
+        out_data = self.data.reshape(shape)
+        out = Value(out_data, (self,))
+        
+        def _backward():
+            self.grad += out.grad.reshape(self.data.shape)
+        
+        out._backward = _backward
+        return out
+    
+    def __radd__(self, other):
+        return self + other
+    
+    def __rmul__(self, other):
+        return self * other
+    
+    def __rsub__(self, other):
+        return other + (-self)
+    
+    def __truediv__(self, other):
+        return self * (other ** -1.)
