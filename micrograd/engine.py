@@ -155,7 +155,36 @@ class Value:
         return self * other
     
     def __rsub__(self, other):
-        return other + (-self)
+        return (-self) + other
     
     def __truediv__(self, other):
         return self * (other ** -1.)
+    
+    def __rtruediv__(self, other):
+        return (self ** -1.) * other
+    
+    def backward(self, grad=None):
+        if grad is None:
+            self.grad = np.one_like(self.data, dtype=np.float64)
+        elif isinstance(grad, (int, float)):
+            self.grad = np.full_like(self.data, grad, dtype=np.float64)
+        elif isinstance(grad, np.ndarray):
+            assert grad.shape == self.data.shape, f"Shape of gradient not match with shape of data, {grad.shape} != {self.data.shape}"
+            self.grad = grad.astype(np.float64)
+        else:
+            raise ValueError(f"Unsupported type for gradient: {type(grad)}")
+        
+        values = []
+        vis = set()
+        
+        def topo_sort(v):
+            if v not in vis:
+                vis.add(v)
+                for child in v._prev:
+                    topo_sort(child)
+                values.append(v)
+                
+        topo_sort(self)
+        
+        for v in reversed(values):
+            v._backward()
